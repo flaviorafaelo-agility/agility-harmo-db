@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HarmoDB - Explorer</title>
+
+  <!-- Syncfusion CSS -->
+  <link href="https://cdn.syncfusion.com/ej2/24.1.41/bootstrap4.css" rel="stylesheet" />
+  <!-- Syncfusion JS -->
+  <script src="https://cdn.syncfusion.com/ej2/24.1.41/dist/ej2.min.js"></script>
+
+  <style>
+    html,
+    body {
+      margin: 0;
+      padding: 0;
+      height: 100vh;
+      max-height: 100vh;
+    }
+
+    .navbar {
+      background-color: #0078d4;
+      padding: 10px;
+      color: white;
+    }
+
+    .layout {
+      display: flex;
+    }
+
+    .sidebar {
+      width: 15%;
+    }
+
+    .content {
+      width: 85%;
+      height: 400px;
+      overflow: hidden;
+
+      padding: 30px;
+      background-color: aqua;
+
+    }
+
+    .loading-overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      background: rgba(255, 255, 255, 0.6);
+      z-index: 1000;
+    }
+
+    .array-cell {
+      cursor: pointer;
+      color: #0078d4;
+      text-align: center;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="navbar">HarmoDB - Explorer</div>
+
+  <div class="layout">
+
+    <div class="sidebar">
+      <div id="treeview"></div>
+    </div>
+
+    <div class="content">
+      <div id="loading" class="loading-overlay" style="display: none;"></div>
+
+      <div>
+        <div id="breadcrumb"></div>
+      </div>
+
+      <div>
+        <div id="grid"></div>
+      </div>
+
+
+    </div>
+
+    <!-- Modal -->
+    <div id="arrayDialog"></div>
+
+  </div>
+
+
+  <script>
+    let selectedRecord = null;
+
+    ej.base.registerLicense('Ngo9BigBOggjHTQxAR8/V1NAaF1cVGhIfEx1RHxQdld5ZFRHallYTnNWUj0eQnxTdEBjXX5fcnZVTmRZU0F2V0lfZw==');
+    ej.popups.createSpinner({ target: document.getElementById('loading') });
+
+    const apiBase = 'http://localhost:8080';
+    let treeView;
+
+    new ej.navigations.TreeView({
+      fields: {
+        dataSource: [],
+        id: 'id',
+        text: 'name',
+        hasChildren: 'hasChildren',
+        child: 'child'
+      },
+      nodeSelected: args => {
+        const data = args.nodeData;
+        const banco = data.banco || (data.parentID && data.parentID.split('-')[0]);
+        const tabela = data.tabela || (data.id && data.id.split('-')[1]);
+        if (banco && tabela) loadGrid(banco, tabela);
+      }
+    }).appendTo('#treeview');
+
+    async function loadTreeView() {
+      const res = await fetch(`${apiBase}/databases`);
+      const { databases } = await res.json();
+
+      const treeData = await Promise.all(databases.map(async db => {
+        const res = await fetch(`${apiBase}/${db}/documents`);
+        const { documents } = await res.json();
+        return {
+          id: db,
+          name: db,
+          hasChildren: true,
+          child: documents.map(doc => ({
+            id: `${db}-${doc.name}`,
+            name: `${doc.name} (${doc.count})`,
+            banco: db,
+            tabela: doc.name
+          }))
+        };
+      }));
+
+      treeView = document.querySelector('#treeview').ej2_instances[0];
+      treeView.fields.dataSource = treeData;
+      treeView.refresh();
+    }
+
+    async function loadGrid(banco, tabela) {
+      const loadingEl = document.getElementById('loading');
+      loadingEl.style.display = 'flex';
+      ej.popups.showSpinner(loadingEl);
+
+      // Atualiza o breadcrumb com Syncfusion
+      const breadcrumb = new ej.navigations.Breadcrumb({
+        items: [
+          { text: banco, iconCss: 'e-icons e-database' },
+          { text: tabela, iconCss: 'e-icons e-file' }
+        ]
+      });
+      const bcContainer = document.getElementById('breadcrumb');
+      bcContainer.innerHTML = '';
+      breadcrumb.appendTo('#breadcrumb');
+
+      try {
+        const res = await fetch(`${apiBase}/${banco}/${tabela}`);
+        const json = await res.json();
+        const data = json.data || [];
+        const sample = data[0] || {};
+
+        const columns = Object.keys(sample).map(key => {
+          return {
+            field: key,
+            headerText: key,
+            width: 200,
+            textAlign: typeof sample[key] === 'number' ? 'Right' : 'Left',
+            template: (cell) => {
+              const val = cell[key];
+              if (Array.isArray(val)) {
+                return `<span class='array-cell' data-field='${key}'>📄 ${val.length} item(s)</span>`;
+              }
+              return val;
+            }
+          };
+        });
+
+        const gridContainer = document.getElementById('grid');
+        if (gridContainer.ej2_instances?.length) gridContainer.ej2_instances[0].destroy();
+        gridContainer.innerHTML = '';
+
+        // Cria o grid com botões de edição
+        const grid = new ej.grids.Grid({
+          dataSource: data,
+          columns: columns,
+          toolbar: [
+            {
+              text: 'Novo',
+              prefixIcon: 'e-icons e-add',
+              id: 'toolbar_novo'
+            },
+            {
+              text: 'Editar',
+              prefixIcon: 'e-icons e-edit',
+              id: 'toolbar_editar'
+            },
+            {
+              text: 'Excluir',
+              prefixIcon: 'e-icons e-delete',
+              id: 'toolbar_excluir'
+            },
+            'Search'
+          ],
+          toolbarClick: async (args) => {
+            if (args.item.id === 'toolbar_novo') {
+              openJsonEditorDialog('Novo Registro', [{}], async (jsonArray) => {
+                await fetch(`${apiBase}/${banco}/${tabela}`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(jsonArray)
+                });
+                loadGrid(banco, tabela);
+              });
+            }
+
+            if (args.item.id === 'toolbar_editar') {
+              if (!selectedRecord) return alert('Selecione um item para editar');
+              openJsonEditorDialog('Editar Registro', [selectedRecord], async (jsonArray) => {
+                await fetch(`${apiBase}/${banco}/${tabela}`, {
+                  method: 'PUT',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(jsonArray)
+                });
+                loadGrid(banco, tabela);
+              });
+            }
+
+            if (args.item.id === 'toolbar_excluir') {
+              if (!selectedRecord) return alert('Selecione um item para excluir');
+
+              const confirma = confirm('Deseja excluir o item selecionado?');
+              if (!confirma) return;
+
+              try {
+                const body = JSON.stringify([selectedRecord]);
+                await fetch(`${apiBase}/${banco}/${tabela}`, {
+                  method: 'DELETE',
+                  headers: { 'Content-Type': 'application/json' },
+                  body
+                });
+                loadGrid(banco, tabela);
+              } catch (e) {
+                alert('Erro ao excluir item.');
+              }
+            }
+          },
+          allowPaging: true,
+          enableVirtualization: true,
+          allowScrolling: true,
+          height: '100%',
+          pageSettings: {
+            pageSize: 50 // só carrega 50 por vez (recomendo 50~100)
+          },
+          rowSelected: (args) => {
+            selectedRecord = args.data;
+          },
+          rowDeselected: () => {
+            selectedRecord = null;
+          },
+          rowDataBound: args => {
+            args.row.addEventListener('click', e => {
+              const cell = e.target.closest('.array-cell');
+              if (!cell) return;
+              const field = cell.dataset.field;
+              const record = args.data;
+              const arrayData = record[field];
+              if (Array.isArray(arrayData)) {
+                showArrayDialog(field, arrayData);
+              }
+            });
+          }
+        });
+
+        grid.appendTo('#grid');
+      } catch (err) {
+        console.error('Erro ao carregar grid:', err);
+      } finally {
+        ej.popups.hideSpinner(loadingEl);
+        loadingEl.style.display = 'none';
+      }
+    }
+
+    function showArrayDialog(field, data) {
+      const container = document.getElementById('arrayDialog');
+      const gridId = `arrayGrid-${Date.now()}`;
+      const gridDiv = document.createElement('div');
+      gridDiv.id = gridId;
+
+      container.innerHTML = '';
+      container.appendChild(gridDiv);
+
+      const dialog = new ej.popups.Dialog({
+        header: `Detalhes de ${field}`,
+        target: document.body,
+        isModal: true,
+        width: '800px',
+        height: '500px',
+        showCloseIcon: true,
+        visible: true,
+        buttons: [
+          {
+            buttonModel: { content: 'Fechar', isPrimary: true },
+            click: () => dialog.hide()
+          }
+        ],
+        open: () => {
+          const sample = data[0] || {};
+          const columns = Object.keys(sample).map(k => ({
+            field: k,
+            headerText: k,
+            width: 150
+          }));
+
+          const grid = new ej.grids.Grid({
+            dataSource: data,
+            columns,
+            allowPaging: false,
+            height: '100%',
+            width: '100%',
+            allowScrolling: true
+          });
+
+          grid.appendTo(`#${gridId}`);
+        }
+      });
+
+      dialog.appendTo(container);
+    }
+
+    function openJsonEditorDialog(titulo, valorPadrao, onConfirmar) {
+      const container = document.getElementById('arrayDialog');
+      container.innerHTML = '<textarea id="jsonEditor" style="width:100%; height:100%; border: none"></textarea>';
+
+      const dialog = new ej.popups.Dialog({
+        header: titulo,
+        target: document.body,
+        isModal: true,
+        width: '50%',
+        height: '50%',
+        showCloseIcon: true,
+        visible: true,
+        buttons: [
+          {
+            buttonModel: { content: 'Cancelar' },
+            click: () => dialog.hide()
+          },
+          {
+            buttonModel: { content: 'Salvar', isPrimary: true },
+            click: () => {
+              try {
+                const json = JSON.parse(document.getElementById('jsonEditor').value);
+                if (!Array.isArray(json)) throw new Error('O JSON deve ser um array');
+                dialog.hide();
+                onConfirmar(json);
+              } catch (err) {
+                alert('Erro no JSON: ' + err.message);
+              }
+            }
+          }
+        ],
+        open: () => {
+          document.getElementById('jsonEditor').value = JSON.stringify(valorPadrao, null, 2);
+        }
+      });
+
+      dialog.appendTo(container);
+    }
+
+
+    loadTreeView();
+  </script>
+</body>
+
+</html>
