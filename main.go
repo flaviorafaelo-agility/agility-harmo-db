@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -38,7 +39,7 @@ func openDatabase(dbname string) (*sql.DB, error) {
 	dir := "./dbs"
 	os.MkdirAll(dir, 0755)
 	dbpath := path.Join(dir, dbname+".db")
-	db, err := sql.Open("sqlite", dbpath)
+	db, err := sql.Open("sqlite", "file:"+dbpath)
 	if err != nil {
 		return nil, err
 	}
@@ -280,6 +281,50 @@ func listDocuments(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{"documents": documents})
 }
 
+func diffFields(prefix string, a, b interface{}) []string {
+	var diffs []string
+
+	switch aVal := a.(type) {
+	case map[string]interface{}:
+		bMap, ok := b.(map[string]interface{})
+		if !ok {
+			return []string{prefix}
+		}
+		for key, aItem := range aVal {
+			subPath := key
+			if prefix != "" {
+				subPath = prefix + "." + key
+			}
+			diffs = append(diffs, diffFields(subPath, aItem, bMap[key])...)
+		}
+	case []interface{}:
+		bArr, ok := b.([]interface{})
+		if !ok {
+			return []string{prefix}
+		}
+		max := len(aVal)
+		if len(bArr) > max {
+			max = len(bArr)
+		}
+		for i := 0; i < max; i++ {
+			var aItem, bItem interface{}
+			if i < len(aVal) {
+				aItem = aVal[i]
+			}
+			if i < len(bArr) {
+				bItem = bArr[i]
+			}
+			subPath := fmt.Sprintf("%s[%d]", prefix, i)
+			diffs = append(diffs, diffFields(subPath, aItem, bItem)...)
+		}
+	default:
+		if !reflect.DeepEqual(a, b) {
+			diffs = append(diffs, prefix)
+		}
+	}
+	return diffs
+}
+
 func genericHandler(w http.ResponseWriter, r *http.Request) {
 	dbname := r.URL.Query().Get("db")
 	doc := r.URL.Query().Get("doc")
@@ -289,6 +334,7 @@ func genericHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	db, err := openDatabase(dbname)
 	if err != nil {
+		err := fmt.Errorf("database '%s' not found", dbname)
 		jsonError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -418,6 +464,8 @@ func genericHandler(w http.ResponseWriter, r *http.Request) {
 				errors = append(errors, map[string]interface{}{"error": "Missing or invalid '_id'", "record": item})
 				continue
 			}
+
+			// Buscar valor atual no banco
 			var currentRaw string
 			err := tx.QueryRow(fmt.Sprintf("SELECT data FROM %s WHERE id = ?", doc), id).Scan(&currentRaw)
 			if err == sql.ErrNoRows {
@@ -425,6 +473,10 @@ func genericHandler(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
+			var current map[string]interface{}
+			json.Unmarshal([]byte(currentRaw), &current)
+
+			// Validar novo item com schema
 			jsonData, _ := json.Marshal(item)
 			ok, msg := validateWithSchema(schema, string(jsonData), "")
 			if !ok {
@@ -432,20 +484,27 @@ func genericHandler(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-			stmt.Exec(string(jsonData), id)
-			updated = append(updated, item)
+			changedFields := diffFields("", current, item)
+
+			if len(changedFields) > 0 {
+				item["_changed"] = changedFields
+				stmt.Exec(string(jsonData), id)
+				updated = append(updated, item)
+			} else {
+				notUpdated = append(notUpdated, item)
+			}
 		}
 		tx.Commit()
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"summary": map[string]int{
+			"_summary": map[string]int{
 				"updated":     len(updated),
 				"not_updated": len(notUpdated),
 				"errors":      len(errors),
 			},
-			"updated":     updated,
-			"not_updated": notUpdated,
-			"errors":      errors,
+			"_updated":     updated,
+			"_not_updated": notUpdated,
+			"_errors":      errors,
 		})
 
 	case http.MethodDelete:
