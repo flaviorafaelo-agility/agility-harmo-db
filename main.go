@@ -212,6 +212,25 @@ func handleDocument(w http.ResponseWriter, r *http.Request) {
 	jsonError(w, "Invalid route or method", http.StatusBadRequest)
 }
 
+func parseFilterX(key, raw string) (string, interface{}) {
+	op := "="
+	r := regexp.MustCompile(`^(<=|>=|!=|=|<|>)(.*)$`)
+	matches := r.FindStringSubmatch(raw)
+	if len(matches) == 3 {
+		op = matches[1]
+		raw = matches[2]
+	}
+
+	var param interface{} = raw
+	if i, err := strconv.Atoi(raw); err == nil {
+		param = i
+	} else if b, err := strconv.ParseBool(raw); err == nil {
+		param = b
+	}
+
+	return fmt.Sprintf("json_extract(data, '$.%s') %s ?", key, op), param
+}
+
 func parseFilter(key, raw string) (string, interface{}) {
 	op := "="
 	r := regexp.MustCompile(`^(<=|>=|!=|=|<|>)(.*)$`)
@@ -228,6 +247,24 @@ func parseFilter(key, raw string) (string, interface{}) {
 		param = b
 	}
 
+	// Suporte a campo com array, ex: enderecos.bairro
+	if strings.Contains(key, ".") {
+		parts := strings.SplitN(key, ".", 2)
+		arrayField := parts[0]
+		subField := parts[1]
+
+		// Gera EXISTS com json_each
+		query := fmt.Sprintf(`
+			EXISTS (
+				SELECT 1 FROM json_each(data, '$.%s')
+				WHERE json_extract(json_each.value, '$.%s') %s ?
+			)
+		`, arrayField, subField, op)
+
+		return query, param
+	}
+
+	// Padrão: campo direto
 	return fmt.Sprintf("json_extract(data, '$.%s') %s ?", key, op), param
 }
 
